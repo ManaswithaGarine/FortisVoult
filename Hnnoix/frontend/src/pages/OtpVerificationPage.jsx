@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Shield, KeyRound, Clock, RefreshCw, ArrowLeft, CheckCircle2 } from 'lucide-react';
+import { Shield, KeyRound, Clock, RefreshCw, ArrowLeft } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { OtpInput } from '../components/OtpInput';
 import { AlertNotification } from '../components/AlertNotification';
@@ -12,7 +12,7 @@ export function OtpVerificationPage() {
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [successMsg, setSuccessMsg] = useState('');
+  const [successMsg, setSuccessMsg] = useState(temp2FAUser?.message || '');
   
   // Expiry timer (5 minutes = 300s)
   const [expiresIn, setExpiresIn] = useState(temp2FAUser?.expiresInSeconds || 300);
@@ -21,7 +21,7 @@ export function OtpVerificationPage() {
 
   // If no 2FA session is active, redirect to login
   useEffect(() => {
-    if (!temp2FAUser) {
+    if (!temp2FAUser?.challengeToken) {
       navigate('/login');
     }
   }, [temp2FAUser, navigate]);
@@ -84,7 +84,7 @@ export function OtpVerificationPage() {
       setCooldown(res.cooldownSeconds || 60);
       setExpiresIn(res.expiresInSeconds || 300);
       setOtp('');
-      setSuccessMsg('A fresh 6-digit OTP has been dispatched.');
+      setSuccessMsg(res.message);
     } catch (err) {
       setError(err.message || 'Failed to resend OTP.');
     } finally {
@@ -103,20 +103,8 @@ export function OtpVerificationPage() {
             <span>FORTIS VAULT 2FA</span>
           </div>
           <h1 className="auth-title">Verify Two-Factor Code</h1>
-          <p className="auth-subtitle">
-            Enter the 6-digit verification code sent to your registered contact
-          </p>
+          <p className="auth-subtitle">Enter the 6-digit verification code sent to your registered email address</p>
         </div>
-
-        {temp2FAUser?.devOtp && (
-          <div className="dev-otp-pill">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <CheckCircle2 size={16} color="#059669" />
-              <span><strong>Dev Demo OTP:</strong></span>
-            </div>
-            <code>{temp2FAUser.devOtp}</code>
-          </div>
-        )}
 
         <AlertNotification type="error" message={error} onClose={() => setError('')} />
         <AlertNotification type="success" message={successMsg} />

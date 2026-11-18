@@ -1,3 +1,6 @@
+process.env.NODE_ENV = 'test';
+process.env.DB_FILE = ':memory:';
+
 const http = require('http');
 const app = require('../server');
 const notificationService = require('../services/notificationService');
@@ -60,7 +63,7 @@ async function runE2E() {
     console.log(`[PASS] Login response: ${loginRes.status}, requiresOtp: ${loginData.requiresOtp}`);
 
     const dispatched = notificationService.getLastDispatchedOtp();
-    console.log(`[E2E Mock Gateway] Captured 6-digit OTP: ${dispatched?.otp}`);
+    console.log(`[E2E Mock Gateway] OTP captured for test delivery to ${dispatched?.recipient}.`);
 
     // 5. OTP Verification (Stage 2 of 2FA)
     console.log('\nStep 5: Testing OTP Verification (Stage 2 of 2FA)...');
@@ -68,7 +71,7 @@ async function runE2E() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        userId: loginData.userId,
+        challengeToken: loginData.challengeToken,
         otp: dispatched.otp,
       }),
     });

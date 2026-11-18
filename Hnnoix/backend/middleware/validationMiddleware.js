@@ -69,6 +69,14 @@ function validateLogin(req, res, next) {
   if (!password || typeof password !== 'string' || password === '') {
     errors.push('Password is required.');
   }
+  if (
+    typeof identifier === 'string' &&
+    identifier.trim() &&
+    !EMAIL_REGEX.test(identifier.trim()) &&
+    !MOBILE_REGEX.test(identifier.trim())
+  ) {
+    errors.push('Please enter a valid email address or 10-digit mobile number.');
+  }
 
   if (errors.length > 0) {
     return res.status(400).json({
@@ -82,11 +90,11 @@ function validateLogin(req, res, next) {
 }
 
 function validateOtpVerify(req, res, next) {
-  const { userId, otp } = req.body;
+  const { challengeToken, otp } = req.body;
   const errors = [];
 
-  if (!userId || typeof userId !== 'string' || userId.trim() === '') {
-    errors.push('User ID is required for OTP verification.');
+  if (!challengeToken || typeof challengeToken !== 'string' || challengeToken.trim() === '') {
+    errors.push('A valid verification session is required.');
   }
 
   if (!otp || typeof otp !== 'string' || !OTP_REGEX.test(otp.trim())) {
@@ -105,12 +113,12 @@ function validateOtpVerify(req, res, next) {
 }
 
 function validateOtpResend(req, res, next) {
-  const { userId } = req.body;
+  const { challengeToken } = req.body;
 
-  if (!userId || typeof userId !== 'string' || userId.trim() === '') {
+  if (!challengeToken || typeof challengeToken !== 'string' || challengeToken.trim() === '') {
     return res.status(400).json({
       success: false,
-      message: 'User ID is required to resend OTP.',
+      message: 'A valid verification session is required to resend OTP.',
     });
   }
 

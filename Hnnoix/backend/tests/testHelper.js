@@ -1,3 +1,6 @@
+process.env.NODE_ENV = 'test';
+process.env.DB_FILE = ':memory:';
+
 const http = require('http');
 const app = require('../server');
 

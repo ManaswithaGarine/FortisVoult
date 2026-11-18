@@ -37,12 +37,10 @@ export function AuthProvider({ children }) {
     const res = await api.auth.login({ identifier, password });
     if (res.requiresOtp) {
       const sessionData = {
-        userId: res.userId,
-        maskedEmail: res.maskedEmail,
-        maskedMobile: res.maskedMobile,
+        challengeToken: res.challengeToken,
+        message: res.message,
         expiresInSeconds: res.expiresInSeconds,
         cooldownSeconds: res.cooldownSeconds,
-        devOtp: res.devOtp,
       };
       setTemp2FAUser(sessionData);
       sessionStorage.setItem('fortis_2fa_session', JSON.stringify(sessionData));
@@ -51,12 +49,12 @@ export function AuthProvider({ children }) {
   };
 
   const verifyOtp = async (otp) => {
-    if (!temp2FAUser?.userId) {
+    if (!temp2FAUser?.challengeToken) {
       throw new Error('No active verification session found. Please log in.');
     }
 
     const res = await api.auth.verifyOtp({
-      userId: temp2FAUser.userId,
+      challengeToken: temp2FAUser.challengeToken,
       otp,
     });
 
@@ -72,19 +70,20 @@ export function AuthProvider({ children }) {
   };
 
   const resendOtp = async () => {
-    if (!temp2FAUser?.userId) {
+    if (!temp2FAUser?.challengeToken) {
       throw new Error('No active verification session found.');
     }
 
     const res = await api.auth.resendOtp({
-      userId: temp2FAUser.userId,
+      challengeToken: temp2FAUser.challengeToken,
     });
 
     const updated = {
       ...temp2FAUser,
+      challengeToken: res.challengeToken,
+      message: res.message,
       expiresInSeconds: res.expiresInSeconds,
       cooldownSeconds: res.cooldownSeconds,
-      devOtp: res.devOtp,
     };
     setTemp2FAUser(updated);
     sessionStorage.setItem('fortis_2fa_session', JSON.stringify(updated));

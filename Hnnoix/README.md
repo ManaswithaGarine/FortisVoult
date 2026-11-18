@@ -38,10 +38,11 @@ This project addresses these security challenges by implementing a layered defen
 - **Cryptographic OTP Two-Factor Authentication (2FA)**:
   - Cryptographically secure 6-digit random code generation (`crypto.randomInt`).
   - 5-minute strict time-to-live (TTL).
-  - SHA-256 HMAC/salted hash storage in the database (plain OTP is never stored).
+  - HMAC-SHA-256 hash storage in the database (plain OTP is never stored).
   - Maximum 3 verification attempts before automated lockout.
   - 60-second cooldown timer between resend requests.
-  - Development mock provider with formatted console banner and dev evaluation pill.
+  - Gmail SMTP delivery to the account's registered email address.
+  - Signed, short-lived OTP challenge tokens; OTP values are never returned or logged.
 - **Customer Banking Dashboard**:
   - Personalized welcome banner (`Welcome, [User Name]`).
   - Masked account number (`XXXX XXXX 1234`).
@@ -60,9 +61,9 @@ This project addresses these security challenges by implementing a layered defen
 
 | Layer | Technologies Used | Rationale |
 | :--- | :--- | :--- |
-| **Backend** | Node.js (v24), Express.js | High-concurrency event-driven architecture, modular routing, industry standard |
+| **Backend** | Node.js (v24), Express.js, Nodemailer | High-concurrency event-driven architecture, modular routing, Gmail SMTP delivery |
 | **Database** | SQLite (`node:sqlite`) | Node 24 native in-process SQL engine, zero C++ compilation dependencies, ACID-compliant, parameterized SQL injection immunity |
-| **Authentication & Crypto** | `bcryptjs`, `jsonwebtoken`, Node `crypto` | Salted hashing (cost 12), signed JWT tokens, SHA-256 OTP hashing, CSPRNG random generation |
+| **Authentication & Crypto** | `bcryptjs`, `jsonwebtoken`, Node `crypto` | Salted hashing (cost 12), signed JWT tokens, HMAC-SHA-256 OTP hashing, CSPRNG random generation |
 | **Security Middleware** | `helmet`, `cors`, `express-rate-limit` | OWASP HTTP headers, restricted CORS policy, IP throttling against brute force |
 | **Frontend** | React 18, Vite 6, React Router v6 | Fast single-page application (SPA), protected route wrappers, component reusability |
 | **Icons & Design** | `lucide-react`, Custom Modern FinTech CSS | Professional dark-navy/slate banking theme, responsive layout, clear accessibility |
@@ -190,7 +191,7 @@ sequenceDiagram
     participant Client as Frontend (React)
     participant API as Backend (Express)
     participant DB as Database (SQLite)
-    participant Console as Notification Gateway
+    participant Email as Gmail SMTP
 
     User->>Client: Enters Credentials (Email/Mobile + Password)
     Client->>API: POST /api/auth/login
@@ -199,15 +200,16 @@ sequenceDiagram
         API-->>Client: 401 "Invalid credentials" (Generic)
     else Valid Credentials
         API->>API: Generate 6-digit random OTP
-        API->>DB: Store SHA-256 hash(OTP) with 5-min TTL
-        API->>Console: Dispatch OTP to log banner
-        API-->>Client: 200 { requiresOtp: true, userId, expiresIn: 300, cooldown: 60 }
+        API->>DB: Store HMAC-SHA-256 hash(OTP) with 5-min TTL
+        API->>Email: Send OTP to the registered email
+        API-->>Client: 200 { requiresOtp: true, challengeToken, expiresIn: 300, cooldown: 60 }
         Client->>User: Renders OTP Verification Page
     end
 
     User->>Client: Enters 6-digit OTP
-    Client->>API: POST /api/auth/verify-otp { userId, otp }
-    API->>DB: Fetch active unverified OTP for userId
+    Client->>API: POST /api/auth/verify-otp { challengeToken, otp }
+    API->>API: Verify signed login challenge
+    API->>DB: Fetch active OTP for challenge user and OTP ID
     alt Exceeded Attempts (>= 3)
         API-->>Client: 429 "Maximum attempts reached. Please request a new OTP."
     else Invalid OTP
@@ -251,10 +253,12 @@ sequenceDiagram
    - Plain passwords are never saved, logged, or returned in responses.
 2. **2FA Cryptographic Security**:
    - Random 6-digit numbers generated via Node's Cryptographically Secure Pseudorandom Number Generator (`crypto.randomInt`).
-   - OTP codes are hashed with SHA-256 + server secret before storage.
+   - OTP codes are keyed-hashed with HMAC-SHA-256 before storage.
    - Enforced 5-minute expiration timestamp.
    - Enforced 3-attempt limit with lockout.
    - OTP records are immediately invalidated upon successful verification.
+   - OTP challenge JWTs bind verification and resend requests to the account's active OTP record.
+   - OTP values are sent only by email and never included in API responses or application logs.
 3. **Defense Against Enumeration**:
    - Generic error messages for login failures (`"Invalid credentials. Please verify your email/mobile and password."`) preventing user discovery.
 4. **Rate Limiting & Abuse Prevention**:
@@ -357,19 +361,25 @@ Hnnoix/
 
 ## 11. Environment Variables
 
-The project includes `.env` and `.env.example` in the `backend/` directory:
+Create `backend/.env` from `backend/.env.example`. The local `.env` is ignored by Git; do not commit credentials.
 
 ```env
 PORT=5000
 NODE_ENV=development
-JWT_SECRET=super_secret_jwt_key_replace_in_production_banking_demo_2026
+JWT_SECRET=replace_with_a_long_random_secret
 JWT_EXPIRES_IN=1h
 OTP_EXPIRY_MINUTES=5
 OTP_MAX_ATTEMPTS=3
 OTP_RESEND_COOLDOWN_SECONDS=60
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USER=mybankingapp.otp@gmail.com
+SMTP_APP_PASSWORD=
 DB_FILE=database.sqlite
 CORS_ORIGIN=http://localhost:5173
 ```
+
+For Gmail, enable 2-Step Verification on the sender account, then create an App Password in the Google Account security settings. Put that App Password in `SMTP_APP_PASSWORD`; do not use your regular Gmail password or commit the value.
 
 ---
 
@@ -446,7 +456,7 @@ You can register any new user directly through the UI, or use the following pre-
 - **Password**: `SecurePass@2026`
 - **Account Type**: `Savings`
 - **Initial Balance**: `₹50,000.00`
-- **2FA OTP**: Displayed in the terminal console banner and in the green **Dev Demo OTP** badge on the verification screen.
+- **2FA OTP**: Delivered to the registered email address and entered on the verification screen. The code is not shown in the UI or application logs.
 
 ---
 
@@ -456,7 +466,7 @@ You can register any new user directly through the UI, or use the following pre-
 | :--- | :--- |
 | **Login Page** | Secure customer portal with email/mobile login, password toggle, and financial security badges. |
 | **Registration Page** | Field validation, real-time password policy checklist, and password match indicator. |
-| **2FA Verification** | 6-digit segmented OTP input, 5-minute countdown clock, resend cooldown timer, and mock banner. |
+| **2FA Verification** | 6-digit segmented OTP input, 5-minute countdown clock, and email resend cooldown timer. |
 | **Dashboard** | Personalized greeting, masked account (`XXXX XXXX 1234`), balance (`₹50,000.00`), transaction ledger, and profile summary. |
 | **Simulated Transfer** | Interactive modal for executing debits and credits with instant balance recalculation. |
 

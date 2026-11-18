@@ -100,17 +100,19 @@ class AuthController {
 
       // Credentials valid! Generate & send 6-digit OTP for 2FA
       const otpResult = await OtpService.generateAndSendOtp(userWithHash);
+      const challengeToken = AuthService.generateOtpChallengeToken(
+        userWithHash.id,
+        otpResult.otpId,
+        otpResult.expiresInSeconds
+      );
 
       return res.status(200).json({
         success: true,
         requiresOtp: true,
-        userId: userWithHash.id,
-        maskedMobile: userWithHash.mobile ? userWithHash.mobile.slice(-4).padStart(10, '•') : null,
-        maskedEmail: userWithHash.email ? userWithHash.email.replace(/(.{2})(.*)(?=@)/, (_, a, b) => a + '•••') : null,
+        challengeToken,
         message: otpResult.message,
         expiresInSeconds: otpResult.expiresInSeconds,
         cooldownSeconds: otpResult.cooldownSeconds,
-        devOtp: otpResult.devOtp, // Only present in development mode
       });
     } catch (error) {
       next(error);
@@ -122,10 +124,11 @@ class AuthController {
    */
   static async verifyOtp(req, res, next) {
     try {
-      const { userId, otp } = req.body;
+      const { challengeToken, otp } = req.body;
+      const challenge = AuthService.verifyOtpChallengeToken(challengeToken);
 
       // Check user exists
-      const user = UserModel.findById(userId);
+      const user = UserModel.findById(challenge.userId);
       if (!user) {
         return res.status(400).json({
           success: false,
@@ -134,7 +137,7 @@ class AuthController {
       }
 
       // Verify OTP
-      await OtpService.verifyOtp(userId, otp);
+      await OtpService.verifyOtp(challenge.userId, challenge.otpId, otp);
 
       // Issue JWT access token
       const token = AuthService.generateToken({
@@ -166,9 +169,10 @@ class AuthController {
    */
   static async resendOtp(req, res, next) {
     try {
-      const { userId } = req.body;
+      const { challengeToken } = req.body;
+      const challenge = AuthService.verifyOtpChallengeToken(challengeToken);
 
-      const user = UserModel.findById(userId);
+      const user = UserModel.findById(challenge.userId);
       if (!user) {
         return res.status(400).json({
           success: false,
@@ -176,14 +180,22 @@ class AuthController {
         });
       }
 
-      const otpResult = await OtpService.generateAndSendOtp(user, { isResend: true });
+      const otpResult = await OtpService.generateAndSendOtp(user, {
+        isResend: true,
+        otpId: challenge.otpId,
+      });
+      const nextChallengeToken = AuthService.generateOtpChallengeToken(
+        user.id,
+        otpResult.otpId,
+        otpResult.expiresInSeconds
+      );
 
       return res.status(200).json({
         success: true,
+        challengeToken: nextChallengeToken,
         message: otpResult.message,
         expiresInSeconds: otpResult.expiresInSeconds,
         cooldownSeconds: otpResult.cooldownSeconds,
-        devOtp: otpResult.devOtp,
       });
     } catch (error) {
       next(error);

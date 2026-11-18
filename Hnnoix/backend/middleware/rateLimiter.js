@@ -13,7 +13,7 @@ const loginLimiter = rateLimit({
   skip: (req) => process.env.NODE_ENV === 'test', // Skip in automated tests
 });
 
-// Rate limiter for OTP requests/resends to prevent SMS bombing or abuse
+// Rate limiter for OTP requests/resends to prevent email flooding or abuse
 const otpLimiter = rateLimit({
   windowMs: 10 * 60 * 1000, // 10 minutes
   max: 15,

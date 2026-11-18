@@ -1,6 +1,7 @@
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert');
 const { startTestServer, stopTestServer, apiRequest } = require('./testHelper');
+const notificationService = require('../services/notificationService');
 
 describe('Authentication & Registration Suite', () => {
   before(async () => {
@@ -138,7 +139,9 @@ describe('Authentication & Registration Suite', () => {
       assert.strictEqual(res.status, 200);
       assert.strictEqual(res.data.success, true);
       assert.strictEqual(res.data.requiresOtp, true);
-      assert.ok(res.data.userId);
+      assert.ok(res.data.challengeToken);
+      assert.strictEqual(res.data.devOtp, undefined);
+      assert.strictEqual(res.data.otp, undefined);
     });
 
     test('9. Login also works with mobile number identifier', async () => {
@@ -153,9 +156,11 @@ describe('Authentication & Registration Suite', () => {
       assert.strictEqual(res.status, 200);
       assert.strictEqual(res.data.success, true);
       assert.strictEqual(res.data.requiresOtp, true);
+      assert.strictEqual(notificationService.getLastDispatchedOtp().recipient, validUser.email);
     });
 
     test('10. Wrong password returns generic 401 error', async () => {
+      const lastDispatch = notificationService.getLastDispatchedOtp();
       const res = await apiRequest('/api/auth/login', {
         method: 'POST',
         body: {
@@ -167,6 +172,7 @@ describe('Authentication & Registration Suite', () => {
       assert.strictEqual(res.status, 401);
       assert.strictEqual(res.data.success, false);
       assert.match(res.data.message, /invalid credentials/i);
+      assert.strictEqual(notificationService.getLastDispatchedOtp(), lastDispatch);
     });
 
     test('11. Non-existent account returns generic 401 error (no user enumeration)', async () => {
@@ -181,6 +187,19 @@ describe('Authentication & Registration Suite', () => {
       assert.strictEqual(res.status, 401);
       assert.strictEqual(res.data.success, false);
       assert.match(res.data.message, /invalid credentials/i);
+    });
+
+    test('12. Malformed email login is rejected with a validation message', async () => {
+      const res = await apiRequest('/api/auth/login', {
+        method: 'POST',
+        body: {
+          identifier: 'not-an-email@',
+          password: validUser.password,
+        },
+      });
+
+      assert.strictEqual(res.status, 400);
+      assert.match(res.data.message, /valid email/i);
     });
   });
 });

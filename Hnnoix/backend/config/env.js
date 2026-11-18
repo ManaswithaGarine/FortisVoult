@@ -11,6 +11,10 @@ const config = {
   otpExpiryMinutes: parseInt(process.env.OTP_EXPIRY_MINUTES, 10) || 5,
   otpMaxAttempts: parseInt(process.env.OTP_MAX_ATTEMPTS, 10) || 3,
   otpResendCooldownSeconds: parseInt(process.env.OTP_RESEND_COOLDOWN_SECONDS, 10) || 60,
+  smtpHost: process.env.SMTP_HOST || 'smtp.gmail.com',
+  smtpPort: parseInt(process.env.SMTP_PORT, 10) || 465,
+  smtpUser: process.env.SMTP_USER || '',
+  smtpAppPassword: process.env.SMTP_APP_PASSWORD || '',
   dbFile: process.env.DB_FILE || 'database.sqlite',
   corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
 };

@@ -5,9 +5,7 @@ const notificationService = require('../services/notificationService');
 
 describe('Dashboard & Protected Routes Suite', () => {
   let userAToken;
-  let userAId;
   let userBToken;
-  let userBId;
 
   before(async () => {
     process.env.NODE_ENV = 'test';
@@ -22,10 +20,9 @@ describe('Dashboard & Protected Routes Suite', () => {
       confirmPassword: 'Password@123',
     };
     const regA = await apiRequest('/api/auth/register', { method: 'POST', body: uA });
-    userAId = regA.data.user.id;
-    await apiRequest('/api/auth/login', { method: 'POST', body: { identifier: uA.email, password: uA.password } });
+    const loginA = await apiRequest('/api/auth/login', { method: 'POST', body: { identifier: uA.email, password: uA.password } });
     const otpA = notificationService.getLastDispatchedOtp().otp;
-    const vA = await apiRequest('/api/auth/verify-otp', { method: 'POST', body: { userId: userAId, otp: otpA } });
+    const vA = await apiRequest('/api/auth/verify-otp', { method: 'POST', body: { challengeToken: loginA.data.challengeToken, otp: otpA } });
     userAToken = vA.data.token;
 
     // Setup User B
@@ -37,10 +34,9 @@ describe('Dashboard & Protected Routes Suite', () => {
       confirmPassword: 'Password@123',
     };
     const regB = await apiRequest('/api/auth/register', { method: 'POST', body: uB });
-    userBId = regB.data.user.id;
-    await apiRequest('/api/auth/login', { method: 'POST', body: { identifier: uB.email, password: uB.password } });
+    const loginB = await apiRequest('/api/auth/login', { method: 'POST', body: { identifier: uB.email, password: uB.password } });
     const otpB = notificationService.getLastDispatchedOtp().otp;
-    const vB = await apiRequest('/api/auth/verify-otp', { method: 'POST', body: { userId: userBId, otp: otpB } });
+    const vB = await apiRequest('/api/auth/verify-otp', { method: 'POST', body: { challengeToken: loginB.data.challengeToken, otp: otpB } });
     userBToken = vB.data.token;
   });
 
