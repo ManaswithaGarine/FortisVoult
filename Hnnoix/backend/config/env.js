@@ -40,10 +40,10 @@ const config = {
 
   databaseUrl: process.env.DATABASE_URL || '',
 
-  resendApiKey: process.env.RESEND_API_KEY || '',
+  brevoApiKey: process.env.BREVO_API_KEY || '',
 
   emailFrom:
-    process.env.EMAIL_FROM || 'onboarding@resend.dev',
+    process.env.EMAIL_FROM || 'mybankingapp.otp@gmail.com',
 
   corsOrigin:
     process.env.CORS_ORIGIN || 'http://localhost:5173',

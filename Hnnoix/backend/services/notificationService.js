@@ -7,7 +7,7 @@ class NotificationService {
   }
 
   async sendOtp({ recipient, otp, name }) {
-    // Preserve the existing test-mode behavior.
+    // Preserve existing test-mode behavior.
     if (config.nodeEnv === 'test') {
       this.lastDispatchedOtp = {
         recipient,
@@ -22,8 +22,8 @@ class NotificationService {
       };
     }
 
-    if (!config.resendApiKey) {
-      throw new Error('RESEND_API_KEY is not configured.');
+    if (!config.brevoApiKey) {
+      throw new Error('BREVO_API_KEY is not configured.');
     }
 
     if (!config.emailFrom) {
@@ -31,10 +31,13 @@ class NotificationService {
     }
 
     const payload = {
-      from: `Fortis Vault <${config.emailFrom}>`,
-      to: [recipient],
+      sender: {
+        name: 'Fortis Vault',
+        email: config.emailFrom,
+      },
+      to: [{ email: recipient }],
       subject: 'Your Fortis Vault login code',
-      text: [
+      textContent: [
         `Hello ${name},`,
         '',
         `Your Fortis Vault verification code is: ${otp}`,
@@ -50,26 +53,29 @@ class NotificationService {
     let response;
 
     try {
-      response = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${config.resendApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
+      response = await fetch(
+        'https://api.brevo.com/v3/smtp/email',
+        {
+          method: 'POST',
+          headers: {
+            'api-key': config.brevoApiKey,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify(payload),
+        }
+      );
     } catch (error) {
-      console.error('Resend network error:', error.message);
-
+      console.error('Brevo network error:', error.message);
       throw new Error('Unable to connect to the email service.');
     }
 
     const result = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      console.error('Resend API error:', {
+      console.error('Brevo API error:', {
         status: response.status,
-        message: result.message || result.error || 'Email delivery failed',
+        message: result.message || 'Email delivery failed',
       });
 
       throw new Error('Unable to send OTP email.');
@@ -77,8 +83,8 @@ class NotificationService {
 
     return {
       success: true,
-      messageId: result.id,
-      provider: 'Resend',
+      messageId: result.messageId,
+      provider: 'Brevo',
       recipient,
     };
   }
