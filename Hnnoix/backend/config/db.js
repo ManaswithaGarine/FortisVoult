@@ -1,114 +1,155 @@
-const { DatabaseSync } = require('node:sqlite');
-const path = require('path');
-const fs = require('fs');
+
+const { Pool } = require('pg');
 const config = require('./env');
-const logger = require('../utils/logger');
 
-let dbInstance = null;
+let pool = null;
+let initializationPromise = null;
 
-function getDb(customPath = null) {
-  if (dbInstance) {
-    return dbInstance;
+function getDb() {
+  if (pool) return pool;
+
+  if (!config.databaseUrl) {
+    throw new Error('DATABASE_URL is not configured.');
   }
 
-  const dbPath = customPath || (
-    config.dbFile === ':memory:'
-      ? ':memory:'
-      : path.resolve(__dirname, '../', config.dbFile)
-  );
+  pool = new Pool({
+    connectionString: config.databaseUrl,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+  });
 
-  if (dbPath !== ':memory:') {
-    const dir = path.dirname(dbPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+  pool.on('error', (error) => {
+    console.error('Unexpected PostgreSQL pool error:', error);
+  });
+
+  return pool;
+}
+
+async function query(text, params = []) {
+  return getDb().query(text, params);
+}
+
+async function withTransaction(callback) {
+  const client = await getDb().connect();
+
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      console.error('PostgreSQL rollback error:', rollbackError);
     }
+
+    throw error;
+  } finally {
+    client.release();
   }
-
-  dbInstance = new DatabaseSync(dbPath);
-
-  // Enable foreign key support and Write-Ahead Logging for concurrency
-  dbInstance.exec('PRAGMA foreign_keys = ON;');
-  if (dbPath !== ':memory:') {
-    dbInstance.exec('PRAGMA journal_mode = WAL;');
-  }
-
-  initTables(dbInstance);
-  logger.info(`Database initialized successfully at ${dbPath}`);
-  return dbInstance;
 }
 
-function initTables(db) {
-  // Users table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL UNIQUE,
-      mobile TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
+async function initDb() {
+  if (initializationPromise) return initializationPromise;
 
-  // Accounts table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS accounts (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL UNIQUE,
-      account_number TEXT NOT NULL UNIQUE,
-      account_type TEXT NOT NULL DEFAULT 'Savings',
-      balance REAL NOT NULL DEFAULT 50000.00,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
+  initializationPromise = (async () => {
+    const db = getDb();
 
-  // Transactions table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS transactions (
-      id TEXT PRIMARY KEY,
-      account_id TEXT NOT NULL,
-      type TEXT CHECK(type IN ('CREDIT', 'DEBIT')) NOT NULL,
-      amount REAL NOT NULL,
-      description TEXT NOT NULL,
-      transaction_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-    );
-  `);
+    const schema = `
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        mobile TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
 
-  // OTP table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS otps (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      otp_hash TEXT NOT NULL,
-      expires_at DATETIME NOT NULL,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      verified INTEGER NOT NULL DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-  `);
+      CREATE TABLE IF NOT EXISTS accounts (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+        account_number TEXT NOT NULL UNIQUE,
+        account_type TEXT NOT NULL,
+        balance NUMERIC(14, 2) NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
 
-  // Indexes for optimal query performance
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-    CREATE INDEX IF NOT EXISTS idx_users_mobile ON users(mobile);
-    CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
-    CREATE INDEX IF NOT EXISTS idx_transactions_account_id ON transactions(account_id);
-    CREATE INDEX IF NOT EXISTS idx_otps_user_id ON otps(user_id);
-  `);
+      CREATE TABLE IF NOT EXISTS transactions (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        type TEXT NOT NULL CHECK (type IN ('CREDIT', 'DEBIT')),
+        amount NUMERIC(14, 2) NOT NULL CHECK (amount > 0),
+        description TEXT NOT NULL,
+        transaction_date TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS otps (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        otp_hash TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        verified BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS revoked_tokens (
+        jti TEXT PRIMARY KEY,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_users_email
+        ON users(email);
+
+      CREATE INDEX IF NOT EXISTS idx_users_mobile
+        ON users(mobile);
+
+      CREATE INDEX IF NOT EXISTS idx_accounts_user_id
+        ON accounts(user_id);
+
+      CREATE INDEX IF NOT EXISTS idx_transactions_account_id
+        ON transactions(account_id);
+
+      CREATE INDEX IF NOT EXISTS idx_otps_user_id
+        ON otps(user_id);
+
+      CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires_at
+        ON revoked_tokens(expires_at);
+    `;
+
+    await db.query(schema);
+
+    console.log('Neon PostgreSQL database initialized successfully.');
+  })();
+
+  try {
+    await initializationPromise;
+  } catch (error) {
+    initializationPromise = null;
+    throw error;
+  }
 }
 
-function closeDb() {
-  if (dbInstance) {
-    dbInstance.close();
-    dbInstance = null;
+async function closeDb() {
+  if (pool) {
+    const currentPool = pool;
+    pool = null;
+    initializationPromise = null;
+
+    await currentPool.end();
+
+    console.log('PostgreSQL connection pool closed.');
   }
 }
 
 module.exports = {
   getDb,
+  query,
+  withTransaction,
+  initDb,
   closeDb,
 };

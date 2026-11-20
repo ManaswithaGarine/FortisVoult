@@ -1,48 +1,102 @@
+
 const crypto = require('crypto');
-const { getDb } = require('../config/db');
+const { query } = require('../config/db');
 
 class TransactionModel {
-  static create({ accountId, type, amount, description, transactionDate }) {
-    const db = getDb();
+  static mapTransaction(row) {
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      accountId: row.account_id,
+      type: row.type,
+      amount: Number(row.amount),
+      description: row.description,
+      transactionDate: row.transaction_date,
+    };
+  }
+
+  static async create({
+    accountId,
+    type,
+    amount,
+    description,
+    transactionDate,
+    client = null,
+  }) {
+    const executor = client || { query };
     const id = crypto.randomUUID();
-    const date = transactionDate || new Date().toISOString();
+    const date = transactionDate || new Date();
 
-    const stmt = db.prepare(`
-      INSERT INTO transactions (id, account_id, type, amount, description, transaction_date)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
+    const result = await executor.query(
+      `INSERT INTO transactions (
+        id,
+        account_id,
+        type,
+        amount,
+        description,
+        transaction_date
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING
+        id,
+        account_id,
+        type,
+        amount,
+        description,
+        transaction_date`,
+      [id, accountId, type, amount, description, date]
+    );
 
-    stmt.run(id, accountId, type, amount, description, date);
-
-    return this.findById(id);
+    return this.mapTransaction(result.rows[0]);
   }
 
-  static findById(id) {
-    const db = getDb();
-    const stmt = db.prepare(`
-      SELECT id, account_id as accountId, type, amount, description, transaction_date as transactionDate
-      FROM transactions WHERE id = ?
-    `);
-    const tx = stmt.get(id);
-    return tx || null;
+  static async findById(id) {
+    const result = await query(
+      `SELECT
+        id,
+        account_id,
+        type,
+        amount,
+        description,
+        transaction_date
+       FROM transactions
+       WHERE id = $1`,
+      [id]
+    );
+
+    return this.mapTransaction(result.rows[0]);
   }
 
-  static findByAccountId(accountId, limit = 50) {
-    const db = getDb();
-    const stmt = db.prepare(`
-      SELECT id, account_id as accountId, type, amount, description, transaction_date as transactionDate
-      FROM transactions 
-      WHERE account_id = ? 
-      ORDER BY transaction_date DESC, id DESC
-      LIMIT ?
-    `);
-    return stmt.all(accountId, limit);
+  static async findByAccountId(accountId, limit = 50) {
+    const safeLimit = Math.max(
+      1,
+      Math.min(100, Math.floor(Number(limit) || 50))
+    );
+
+    const result = await query(
+      `SELECT
+        id,
+        account_id,
+        type,
+        amount,
+        description,
+        transaction_date
+       FROM transactions
+       WHERE account_id = $1
+       ORDER BY transaction_date DESC, id DESC
+       LIMIT $2`,
+      [accountId, safeLimit]
+    );
+
+    return result.rows.map((row) => this.mapTransaction(row));
   }
 
   /**
-   * Seeds standard simulated transactions for a newly registered account.
+   * Seeds standard simulated transactions
+   * for a newly registered account.
    */
-  static seedInitialTransactions(accountId) {
+  static async seedInitialTransactions(accountId, client = null) {
     const initialTxs = [
       {
         type: 'CREDIT',
@@ -76,15 +130,22 @@ class TransactionModel {
       },
     ];
 
+    const transactions = [];
+
     for (const tx of initialTxs) {
-      this.create({
+      const created = await this.create({
         accountId,
         type: tx.type,
         amount: tx.amount,
         description: tx.description,
         transactionDate: tx.transactionDate,
+        client,
       });
+
+      transactions.push(created);
     }
+
+    return transactions;
   }
 }
 

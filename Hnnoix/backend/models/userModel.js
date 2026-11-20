@@ -1,59 +1,116 @@
+
 const crypto = require('crypto');
-const { getDb } = require('../config/db');
+const { query } = require('../config/db');
 
 class UserModel {
-  static create({ name, email, mobile, passwordHash }) {
-    const db = getDb();
+  static async create({
+    name,
+    email,
+    mobile,
+    passwordHash,
+    client = null,
+  }) {
+    const executor = client || { query };
+
     const id = crypto.randomUUID();
-    const now = new Date().toISOString();
+    const now = new Date();
 
-    const stmt = db.prepare(`
-      INSERT INTO users (id, name, email, mobile, password_hash, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
+    const result = await executor.query(
+      `INSERT INTO users (
+        id,
+        name,
+        email,
+        mobile,
+        password_hash,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING
+        id,
+        name,
+        email,
+        mobile,
+        created_at,
+        updated_at`,
+      [
+        id,
+        name.trim(),
+        email.trim().toLowerCase(),
+        mobile.trim(),
+        passwordHash,
+        now,
+        now,
+      ]
+    );
 
-    stmt.run(id, name.trim(), email.trim().toLowerCase(), mobile.trim(), passwordHash, now, now);
-
-    return this.findById(id);
+    return result.rows[0] || null;
   }
 
-  static findById(id) {
-    const db = getDb();
-    const stmt = db.prepare('SELECT id, name, email, mobile, created_at, updated_at FROM users WHERE id = ?');
-    const user = stmt.get(id);
-    return user || null;
+  static async findById(id) {
+    const result = await query(
+      `SELECT
+        id,
+        name,
+        email,
+        mobile,
+        created_at,
+        updated_at
+       FROM users
+       WHERE id = $1`,
+      [id]
+    );
+
+    return result.rows[0] || null;
   }
 
-  static findByIdWithHash(id) {
-    const db = getDb();
-    const stmt = db.prepare('SELECT id, name, email, mobile, password_hash, created_at, updated_at FROM users WHERE id = ?');
-    const user = stmt.get(id);
-    return user || null;
+  static async findByIdWithHash(id) {
+    const result = await query(
+      `SELECT
+        id,
+        name,
+        email,
+        mobile,
+        password_hash,
+        created_at,
+        updated_at
+       FROM users
+       WHERE id = $1`,
+      [id]
+    );
+
+    return result.rows[0] || null;
   }
 
-  static findByEmail(email) {
-    const db = getDb();
-    const stmt = db.prepare('SELECT * FROM users WHERE email = ?');
-    const user = stmt.get(email.trim().toLowerCase());
-    return user || null;
+  static async findByEmail(email) {
+    const result = await query(
+      'SELECT * FROM users WHERE email = $1',
+      [email.trim().toLowerCase()]
+    );
+
+    return result.rows[0] || null;
   }
 
-  static findByMobile(mobile) {
-    const db = getDb();
-    const stmt = db.prepare('SELECT * FROM users WHERE mobile = ?');
-    const user = stmt.get(mobile.trim());
-    return user || null;
+  static async findByMobile(mobile) {
+    const result = await query(
+      'SELECT * FROM users WHERE mobile = $1',
+      [mobile.trim()]
+    );
+
+    return result.rows[0] || null;
   }
 
-  static findByEmailOrMobile(identifier) {
-    const db = getDb();
+  static async findByEmailOrMobile(identifier) {
     const cleanId = identifier.trim().toLowerCase();
-    const stmt = db.prepare(`
-      SELECT * FROM users 
-      WHERE email = ? OR mobile = ?
-    `);
-    const user = stmt.get(cleanId, identifier.trim());
-    return user || null;
+
+    const result = await query(
+      `SELECT *
+       FROM users
+       WHERE email = $1 OR mobile = $2`,
+      [cleanId, identifier.trim()]
+    );
+
+    return result.rows[0] || null;
   }
 }
 

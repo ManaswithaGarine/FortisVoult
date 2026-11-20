@@ -4,3 +4,11 @@
 node_modules/
 *.sqlite-shm
 *.sqlite-wal
+# Generated build files and local backups
+**/dist/
+Hnnoix/release/
+Hnnoix/backend-backup-2026-11-20/
+
+# Local SQLite databases
+*.sqlite
+*.sqlite3

@@ -1,13 +1,21 @@
+
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert');
-const { startTestServer, stopTestServer, apiRequest } = require('./testHelper');
+const {
+  startTestServer,
+  stopTestServer,
+  apiRequest,
+} = require('./testHelper');
+
 const notificationService = require('../services/notificationService');
-const { getDb } = require('../config/db');
+const { query } = require('../config/db');
 
 describe('Two-Factor Authentication (OTP) Suite', () => {
   let userId;
   let challengeToken;
+
   const unique = Date.now();
+
   const testUser = {
     name: 'Priya Sharma',
     email: `priya_${unique}@example.com`,
@@ -17,14 +25,14 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
   };
 
   before(async () => {
-    process.env.NODE_ENV = 'test';
     await startTestServer();
 
-    // Register user
     const regRes = await apiRequest('/api/auth/register', {
       method: 'POST',
       body: testUser,
     });
+
+    assert.strictEqual(regRes.status, 201);
     userId = regRes.data.user.id;
   });
 
@@ -46,20 +54,29 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
     assert.ok(loginRes.data.challengeToken);
     assert.strictEqual(loginRes.data.otp, undefined);
     assert.strictEqual(loginRes.data.devOtp, undefined);
+
     challengeToken = loginRes.data.challengeToken;
 
     const dispatched = notificationService.getLastDispatchedOtp();
+
     assert.ok(dispatched);
     assert.strictEqual(dispatched.otp.length, 6);
     assert.strictEqual(dispatched.recipient, testUser.email);
-    assert.match(loginRes.data.message, /sent to your registered email address/i);
+    assert.match(
+      loginRes.data.message,
+      /sent to your registered email address/i
+    );
   });
 
   test('2. OTP verification rejects missing or tampered login challenges', async () => {
     const missingChallenge = await apiRequest('/api/auth/verify-otp', {
       method: 'POST',
-      body: { userId, otp: '123456' },
+      body: {
+        userId,
+        otp: '123456',
+      },
     });
+
     assert.strictEqual(missingChallenge.status, 400);
 
     const tamperedChallenge = await apiRequest('/api/auth/verify-otp', {
@@ -69,6 +86,7 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
         otp: '123456',
       },
     });
+
     assert.strictEqual(tamperedChallenge.status, 401);
   });
 
@@ -77,7 +95,7 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
       method: 'POST',
       body: {
         challengeToken,
-        otp: '000000', // Intentional wrong OTP
+        otp: '000000',
       },
     });
 
@@ -87,16 +105,20 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
   });
 
   test('4. Enforce maximum 3 failed attempts lockout', async () => {
-    // Attempt 2
     await apiRequest('/api/auth/verify-otp', {
       method: 'POST',
-      body: { challengeToken, otp: '111111' },
+      body: {
+        challengeToken,
+        otp: '111111',
+      },
     });
 
-    // Attempt 3 (exceeding limit)
     const lockedRes = await apiRequest('/api/auth/verify-otp', {
       method: 'POST',
-      body: { challengeToken, otp: '222222' },
+      body: {
+        challengeToken,
+        otp: '222222',
+      },
     });
 
     assert.strictEqual(lockedRes.status, 429);
@@ -105,25 +127,48 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
 
   test('5. Resend OTP creates fresh OTP after previous lock', async () => {
     const previousChallengeToken = challengeToken;
-    const db = getDb();
-    const activeOtpId = db.prepare(
-      'SELECT id FROM otps WHERE user_id = ? ORDER BY created_at DESC LIMIT 1'
-    ).get(userId).id;
-    db.prepare("UPDATE otps SET created_at = datetime('now', '-70 seconds') WHERE id = ?").run(activeOtpId);
+
+    // PostgreSQL: make the latest OTP older than the resend cooldown.
+    const activeOtpResult = await query(
+      `SELECT id
+       FROM otps
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+
+    assert.ok(activeOtpResult.rows.length > 0);
+
+    const activeOtpId = activeOtpResult.rows[0].id;
+
+    await query(
+      `UPDATE otps
+       SET created_at = NOW() - INTERVAL '70 seconds'
+       WHERE id = $1`,
+      [activeOtpId]
+    );
 
     const resendRes = await apiRequest('/api/auth/resend-otp', {
       method: 'POST',
-      body: { challengeToken },
+      body: {
+        challengeToken,
+      },
     });
 
     assert.strictEqual(resendRes.status, 200);
     assert.strictEqual(resendRes.data.success, true);
     assert.strictEqual(resendRes.data.cooldownSeconds, 60);
     assert.strictEqual(resendRes.data.devOtp, undefined);
-    assert.notStrictEqual(resendRes.data.challengeToken, previousChallengeToken);
+    assert.notStrictEqual(
+      resendRes.data.challengeToken,
+      previousChallengeToken
+    );
+
     challengeToken = resendRes.data.challengeToken;
 
     const newDispatched = notificationService.getLastDispatchedOtp();
+
     assert.ok(newDispatched);
     assert.strictEqual(newDispatched.otp.length, 6);
   });
@@ -131,7 +176,9 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
   test('6. Prevent immediate resend if cooldown period is active', async () => {
     const resendImmediate = await apiRequest('/api/auth/resend-otp', {
       method: 'POST',
-      body: { challengeToken },
+      body: {
+        challengeToken,
+      },
     });
 
     assert.strictEqual(resendImmediate.status, 429);
@@ -151,7 +198,7 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
 
     assert.strictEqual(verifyRes.status, 200);
     assert.strictEqual(verifyRes.data.success, true);
-    assert.ok(verifyRes.data.token, 'JWT token must be present');
+    assert.ok(verifyRes.data.token);
     assert.strictEqual(verifyRes.data.user.name, testUser.name);
   });
 
@@ -172,7 +219,6 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
   });
 
   test('9. Reject expired OTP', async () => {
-    // Generate a new login challenge after the prior OTP was consumed.
     const loginRes = await apiRequest('/api/auth/login', {
       method: 'POST',
       body: {
@@ -180,14 +226,30 @@ describe('Two-Factor Authentication (OTP) Suite', () => {
         password: testUser.password,
       },
     });
+
+    assert.strictEqual(loginRes.status, 200);
     challengeToken = loginRes.data.challengeToken;
 
-    const db = getDb();
-    const activeOtpId = db.prepare(
-      'SELECT id FROM otps WHERE user_id = ? ORDER BY created_at DESC LIMIT 1'
-    ).get(userId).id;
+    const activeOtpResult = await query(
+      `SELECT id
+       FROM otps
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+
+    assert.ok(activeOtpResult.rows.length > 0);
+
+    const activeOtpId = activeOtpResult.rows[0].id;
     const activeOtp = notificationService.getLastDispatchedOtp().otp;
-    db.prepare("UPDATE otps SET expires_at = datetime('now', '-1 minute') WHERE id = ?").run(activeOtpId);
+
+    await query(
+      `UPDATE otps
+       SET expires_at = NOW() - INTERVAL '1 minute'
+       WHERE id = $1`,
+      [activeOtpId]
+    );
 
     const expiredRes = await apiRequest('/api/auth/verify-otp', {
       method: 'POST',

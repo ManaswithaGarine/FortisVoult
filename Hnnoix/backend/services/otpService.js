@@ -1,71 +1,138 @@
+
 const crypto = require('crypto');
 const config = require('../config/env');
+const { withTransaction } = require('../config/db');
 const OtpModel = require('../models/otpModel');
 const notificationService = require('./notificationService');
 const logger = require('../utils/logger');
 
 class OtpService {
-  /**
-   * Generates a keyed hash so the low-entropy OTP cannot be recovered from the database alone.
-   */
   static hashOtp(otp) {
-    return crypto.createHmac('sha256', config.jwtSecret).update(otp).digest('hex');
+    return crypto
+      .createHmac('sha256', config.jwtSecret)
+      .update(otp)
+      .digest('hex');
   }
 
-  /**
-   * Generate and dispatch a 6-digit OTP to the user's registered email address.
-   */
-  static async generateAndSendOtp(user, { isResend = false, otpId = null } = {}) {
-    // 1. Check for active OTP and enforce cooldown
-    const latestOtp = OtpModel.getLatestOtpForUser(user.id);
-    if (isResend && (!latestOtp || latestOtp.id !== otpId || latestOtp.verified)) {
-      const error = new Error('Verification session is no longer active. Please log in again.');
-      error.statusCode = 400;
-      throw error;
-    }
+  static createError(message, statusCode, extra = {}) {
+    return Object.assign(new Error(message), {
+      statusCode,
+      ...extra,
+    });
+  }
 
-    if (latestOtp && !latestOtp.verified) {
-      const createdAtTime = new Date(latestOtp.createdAt).getTime();
-      const timeSinceCreatedSeconds = Math.floor((Date.now() - createdAtTime) / 1000);
-      const isExpired = Date.now() >= new Date(latestOtp.expiresAt).getTime();
+  static async withUserLock(userId, callback) {
+    return withTransaction(async (client) => {
+      await client.query(
+        `SELECT pg_advisory_xact_lock(
+          hashtextextended($1, 0)
+        )`,
+        [`fortis-vault-otp:${userId}`]
+      );
 
-      if (!isExpired && timeSinceCreatedSeconds < config.otpResendCooldownSeconds) {
-        const remainingCooldown = config.otpResendCooldownSeconds - timeSinceCreatedSeconds;
-        if (isResend) {
-          const error = new Error(`Please wait ${remainingCooldown} seconds before requesting a new OTP.`);
-          error.statusCode = 429;
-          error.cooldownRemaining = remainingCooldown;
-          throw error;
-        }
+      return callback(client);
+    });
+  }
 
-        return {
-          success: true,
-          otpId: latestOtp.id,
-          message: 'OTP has been sent to your registered email address. Please check your inbox.',
-          expiresInSeconds: Math.max(0, Math.floor((new Date(latestOtp.expiresAt) - Date.now()) / 1000)),
-          cooldownSeconds: remainingCooldown,
-        };
-      }
-    }
-
-    // 2. Invalidate any previous unverified OTPs
-    OtpModel.invalidateUserOtps(user.id);
-
-    // 3. Generate a cryptographically secure 6-digit OTP.
+  static async generateAndSendOtp(
+    user,
+    { isResend = false, otpId = null } = {}
+  ) {
     const otp = crypto.randomInt(100000, 1000000).toString();
     const otpHash = this.hashOtp(otp);
 
-    // 4. Calculate expiration timestamp (5 minutes)
-    const expiresAt = new Date(Date.now() + config.otpExpiryMinutes * 60 * 1000).toISOString();
+    const result = await this.withUserLock(
+      user.id,
+      async (client) => {
+        const latestOtp =
+          await OtpModel.getLatestOtpForUser(user.id, client);
 
-    // 5. Store OTP record in database
-    const createdOtpRecord = OtpModel.create({
-      userId: user.id,
-      otpHash,
-      expiresAt,
-    });
+        if (
+          isResend &&
+          (!latestOtp ||
+            latestOtp.id !== otpId ||
+            latestOtp.verified)
+        ) {
+          throw this.createError(
+            'Verification session is no longer active. Please log in again.',
+            400
+          );
+        }
 
-    // 6. Deliver only to the registered email and invalidate the code if delivery fails.
+        if (latestOtp && !latestOtp.verified) {
+          const createdAt = new Date(latestOtp.createdAt).getTime();
+          const now = Date.now();
+
+          const elapsedSeconds = Math.floor(
+            (now - createdAt) / 1000
+          );
+
+          const expired =
+            now >= new Date(latestOtp.expiresAt).getTime();
+
+          if (
+            !expired &&
+            elapsedSeconds < config.otpResendCooldownSeconds
+          ) {
+            const remaining =
+              config.otpResendCooldownSeconds - elapsedSeconds;
+
+            if (isResend) {
+              throw this.createError(
+                `Please wait ${remaining} seconds before requesting a new OTP.`,
+                429,
+                { cooldownRemaining: remaining }
+              );
+            }
+
+            return {
+              existing: true,
+              otpId: latestOtp.id,
+              expiresInSeconds: Math.max(
+                0,
+                Math.floor(
+                  (new Date(latestOtp.expiresAt).getTime() - now) /
+                    1000
+                )
+              ),
+              cooldownSeconds: remaining,
+            };
+          }
+        }
+
+        await OtpModel.invalidateUserOtps(user.id, client);
+
+        const expiresAt = new Date(
+          Date.now() + config.otpExpiryMinutes * 60 * 1000
+        ).toISOString();
+
+        const createdOtp = await OtpModel.create({
+          userId: user.id,
+          otpHash,
+          expiresAt,
+          client,
+        });
+
+        return {
+          existing: false,
+          otpId: createdOtp.id,
+          expiresInSeconds: config.otpExpiryMinutes * 60,
+          cooldownSeconds: config.otpResendCooldownSeconds,
+        };
+      }
+    );
+
+    if (result.existing) {
+      return {
+        success: true,
+        otpId: result.otpId,
+        message:
+          'OTP has been sent to your registered email address. Please check your inbox.',
+        expiresInSeconds: result.expiresInSeconds,
+        cooldownSeconds: result.cooldownSeconds,
+      };
+    }
+
     try {
       await notificationService.sendOtp({
         recipient: user.email,
@@ -73,7 +140,21 @@ class OtpService {
         name: user.name,
       });
     } catch (error) {
-      OtpModel.markVerified(createdOtpRecord.id);
+      try {
+        await this.withUserLock(user.id, async (client) => {
+          const latestOtp =
+            await OtpModel.getLatestOtpForUser(user.id, client);
+
+          if (latestOtp && latestOtp.id === result.otpId) {
+            await OtpModel.markVerified(result.otpId, client);
+          }
+        });
+      } catch (invalidationError) {
+        logger.error(
+          `Failed to invalidate undelivered OTP: ${invalidationError.message}`
+        );
+      }
+
       throw error;
     }
 
@@ -81,87 +162,145 @@ class OtpService {
 
     return {
       success: true,
-      otpId: createdOtpRecord.id,
-      message: 'OTP has been sent to your registered email address. Please check your inbox.',
-      expiresInSeconds: config.otpExpiryMinutes * 60,
-      cooldownSeconds: config.otpResendCooldownSeconds,
+      otpId: result.otpId,
+      message:
+        'OTP has been sent to your registered email address. Please check your inbox.',
+      expiresInSeconds: result.expiresInSeconds,
+      cooldownSeconds: result.cooldownSeconds,
     };
   }
 
-  /**
-   * Verifies an OTP against the specific signed login challenge.
-   */
   static async verifyOtp(userId, otpId, enteredOtp) {
-    if (!enteredOtp || enteredOtp.trim().length !== 6) {
-      const error = new Error('Please enter a valid 6-digit OTP.');
-      error.statusCode = 400;
-      throw error;
+    if (
+      typeof enteredOtp !== 'string' ||
+      !/^\d{6}$/.test(enteredOtp.trim())
+    ) {
+      throw this.createError(
+        'Please enter a valid 6-digit OTP.',
+        400
+      );
     }
 
-    const latestOtp = OtpModel.findById(otpId);
+    const outcome = await this.withUserLock(
+      userId,
+      async (client) => {
+        const latestOtp =
+          await OtpModel.getLatestOtpForUser(userId, client);
 
-    if (!latestOtp || latestOtp.userId !== userId) {
-      const error = new Error('No active OTP found. Please request a new one.');
-      error.statusCode = 400;
-      throw error;
-    }
+        if (!latestOtp || latestOtp.id !== otpId) {
+          return {
+            error: this.createError(
+              'This verification session is no longer active. Please log in again.',
+              400
+            ),
+          };
+        }
 
-    const currentOtp = OtpModel.getLatestOtpForUser(userId);
-    if (!currentOtp || currentOtp.id !== otpId) {
-      const error = new Error('This verification session is no longer active. Please log in again.');
-      error.statusCode = 400;
-      throw error;
-    }
+        if (latestOtp.verified) {
+          return {
+            error: this.createError(
+              'This OTP has already been used. Please request a new one.',
+              400
+            ),
+          };
+        }
 
-    // Check if already verified
-    if (latestOtp.verified) {
-      const error = new Error('This OTP has already been used. Please request a new one.');
-      error.statusCode = 400;
-      throw error;
-    }
+        if (
+          Date.now() >= new Date(latestOtp.expiresAt).getTime()
+        ) {
+          return {
+            error: this.createError(
+              'OTP has expired. Please request a new OTP.',
+              400
+            ),
+          };
+        }
 
-    // Check expiration
-    const now = new Date();
-    const expiry = new Date(latestOtp.expiresAt);
-    if (now >= expiry) {
-      const error = new Error('OTP has expired. Please request a new OTP.');
-      error.statusCode = 400;
-      throw error;
-    }
+        if (latestOtp.attempts >= config.otpMaxAttempts) {
+          return {
+            error: this.createError(
+              'Maximum verification attempts exceeded. Please request a new OTP.',
+              429
+            ),
+          };
+        }
 
-    // Check maximum attempts
-    if (latestOtp.attempts >= config.otpMaxAttempts) {
-      const error = new Error('Maximum verification attempts exceeded. Please request a new OTP.');
-      error.statusCode = 429;
-      throw error;
-    }
+        const updatedOtp = await OtpModel.incrementAttempts(
+          otpId,
+          client
+        );
 
-    // Increment attempts count
-    const updatedOtp = OtpModel.incrementAttempts(latestOtp.id);
+        if (!updatedOtp) {
+          return {
+            error: this.createError(
+              'OTP is no longer active. Please request a new one.',
+              400
+            ),
+          };
+        }
 
-    // Verify hash
-    const inputHash = Buffer.from(this.hashOtp(enteredOtp.trim()), 'hex');
-    const storedHash = Buffer.from(latestOtp.otpHash, 'hex');
-    const isValidOtp = storedHash.length === inputHash.length && crypto.timingSafeEqual(inputHash, storedHash);
-    if (!isValidOtp) {
-      const remainingAttempts = config.otpMaxAttempts - updatedOtp.attempts;
-      logger.security(`Failed OTP attempt for user ${userId}. Remaining attempts: ${remainingAttempts}`);
+        const inputHash = Buffer.from(
+          this.hashOtp(enteredOtp.trim()),
+          'hex'
+        );
 
-      if (remainingAttempts <= 0) {
-        const error = new Error('Invalid OTP. Maximum attempts reached. Please request a new OTP.');
-        error.statusCode = 429;
-        throw error;
-      } else {
-        const error = new Error(`Invalid OTP. ${remainingAttempts} attempt(s) remaining.`);
-        error.statusCode = 400;
-        error.remainingAttempts = remainingAttempts;
-        throw error;
+        const storedHash = Buffer.from(
+          latestOtp.otpHash,
+          'hex'
+        );
+
+        const isValid =
+          storedHash.length === inputHash.length &&
+          crypto.timingSafeEqual(inputHash, storedHash);
+
+        if (!isValid) {
+          const remaining =
+            config.otpMaxAttempts - updatedOtp.attempts;
+
+          logger.security(
+            `Failed OTP attempt for user ${userId}. Remaining attempts: ${remaining}`
+          );
+
+          return {
+            error: this.createError(
+              remaining <= 0
+                ? 'Invalid OTP. Maximum attempts reached. Please request a new OTP.'
+                : `Invalid OTP. ${remaining} attempt(s) remaining.`,
+              remaining <= 0 ? 429 : 400,
+              { remainingAttempts: remaining }
+            ),
+          };
+        }
+
+        const verifiedOtp = await OtpModel.markVerified(
+          otpId,
+          client
+        );
+
+        if (!verifiedOtp) {
+          return {
+            error: this.createError(
+              'OTP verification failed. Please request a new OTP.',
+              400
+            ),
+          };
+        }
+
+        return {
+          success: true,
+        };
       }
+    );
+
+    // The transaction has committed before an API error is thrown.
+    // Therefore, incorrect OTP attempts remain recorded.
+    if (outcome.error) {
+      throw outcome.error;
     }
 
-    // OTP is valid! Mark as verified
-    OtpModel.markVerified(latestOtp.id);
-    logger.security(`OTP successfully verified for user: ${userId}`);
+    logger.security(
+      `OTP successfully verified for user: ${userId}`
+    );
 
     return {
       success: true,

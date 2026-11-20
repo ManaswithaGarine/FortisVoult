@@ -1,43 +1,110 @@
+
 const crypto = require('crypto');
-const { getDb } = require('../config/db');
+const { query } = require('../config/db');
 const { generateAccountNumber } = require('../utils/helpers');
 
 class AccountModel {
-  static create({ userId, accountNumber, accountType = 'Savings', balance = 50000.00 }) {
-    const db = getDb();
+  static mapAccount(row) {
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      userId: row.user_id,
+      accountNumber: row.account_number,
+      accountType: row.account_type,
+      balance: Number(row.balance),
+      createdAt: row.created_at,
+    };
+  }
+
+  static async create({
+    userId,
+    accountNumber,
+    accountType = 'Savings',
+    balance = 50000.00,
+    client = null,
+  }) {
+    const executor = client || { query };
+
     const id = crypto.randomUUID();
     const accNumber = accountNumber || generateAccountNumber();
-    const now = new Date().toISOString();
+    const now = new Date();
 
-    const stmt = db.prepare(`
-      INSERT INTO accounts (id, user_id, account_number, account_type, balance, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
+    const result = await executor.query(
+      `INSERT INTO accounts (
+        id,
+        user_id,
+        account_number,
+        account_type,
+        balance,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING
+        id,
+        user_id,
+        account_number,
+        account_type,
+        balance,
+        created_at`,
+      [id, userId, accNumber, accountType, balance, now]
+    );
 
-    stmt.run(id, userId, accNumber, accountType, balance, now);
-
-    return this.findById(id);
+    return this.mapAccount(result.rows[0]);
   }
 
-  static findById(id) {
-    const db = getDb();
-    const stmt = db.prepare('SELECT id, user_id as userId, account_number as accountNumber, account_type as accountType, balance, created_at as createdAt FROM accounts WHERE id = ?');
-    const acc = stmt.get(id);
-    return acc || null;
+  static async findById(id) {
+    const result = await query(
+      `SELECT
+        id,
+        user_id,
+        account_number,
+        account_type,
+        balance,
+        created_at
+       FROM accounts
+       WHERE id = $1`,
+      [id]
+    );
+
+    return this.mapAccount(result.rows[0]);
   }
 
-  static findByUserId(userId) {
-    const db = getDb();
-    const stmt = db.prepare('SELECT id, user_id as userId, account_number as accountNumber, account_type as accountType, balance, created_at as createdAt FROM accounts WHERE user_id = ?');
-    const acc = stmt.get(userId);
-    return acc || null;
+  static async findByUserId(userId) {
+    const result = await query(
+      `SELECT
+        id,
+        user_id,
+        account_number,
+        account_type,
+        balance,
+        created_at
+       FROM accounts
+       WHERE user_id = $1`,
+      [userId]
+    );
+
+    return this.mapAccount(result.rows[0]);
   }
 
-  static updateBalance(accountId, newBalance) {
-    const db = getDb();
-    const stmt = db.prepare('UPDATE accounts SET balance = ? WHERE id = ?');
-    stmt.run(newBalance, accountId);
-    return this.findById(accountId);
+  static async updateBalance(accountId, newBalance, client = null) {
+    const executor = client || { query };
+
+    const result = await executor.query(
+      `UPDATE accounts
+       SET balance = $1
+       WHERE id = $2
+       RETURNING
+         id,
+         user_id,
+         account_number,
+         account_type,
+         balance,
+         created_at`,
+      [newBalance, accountId]
+    );
+
+    return this.mapAccount(result.rows[0]);
   }
 }
 

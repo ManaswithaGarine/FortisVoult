@@ -1,20 +1,19 @@
+
 const UserModel = require('../models/userModel');
 const AccountModel = require('../models/accountModel');
 const TransactionModel = require('../models/transactionModel');
 const AuthService = require('../services/authService');
 const OtpService = require('../services/otpService');
+const { withTransaction } = require('../config/db');
 const logger = require('../utils/logger');
 
 class AuthController {
-  /**
-   * User Registration
-   */
   static async register(req, res, next) {
     try {
       const { name, email, mobile, password } = req.body;
 
-      // 1. Check for duplicate email
-      const existingEmail = UserModel.findByEmail(email);
+      const existingEmail = await UserModel.findByEmail(email);
+
       if (existingEmail) {
         return res.status(409).json({
           success: false,
@@ -22,8 +21,8 @@ class AuthController {
         });
       }
 
-      // 2. Check for duplicate mobile
-      const existingMobile = UserModel.findByMobile(mobile);
+      const existingMobile = await UserModel.findByMobile(mobile);
+
       if (existingMobile) {
         return res.status(409).json({
           success: false,
@@ -31,28 +30,37 @@ class AuthController {
         });
       }
 
-      // 3. Hash password using bcrypt
       const passwordHash = await AuthService.hashPassword(password);
 
-      // 4. Create user in database
-      const user = UserModel.create({
-        name,
-        email,
-        mobile,
-        passwordHash,
+      const registration = await withTransaction(async (client) => {
+        const user = await UserModel.create({
+          name,
+          email,
+          mobile,
+          passwordHash,
+          client,
+        });
+
+        const account = await AccountModel.create({
+          userId: user.id,
+          accountType: 'Savings',
+          balance: 50000.00,
+          client,
+        });
+
+        await TransactionModel.seedInitialTransactions(
+          account.id,
+          client
+        );
+
+        return { user, account };
       });
 
-      // 5. Automatically create a simulated bank account for this user
-      const account = AccountModel.create({
-        userId: user.id,
-        accountType: 'Savings',
-        balance: 50000.00,
-      });
+      const { user } = registration;
 
-      // 6. Seed initial realistic simulated transactions
-      TransactionModel.seedInitialTransactions(account.id);
-
-      logger.info(`User registered successfully: ${user.id} (${user.email})`);
+      logger.info(
+        `User registered successfully: ${user.id} (${user.email})`
+      );
 
       return res.status(201).json({
         success: true,
@@ -69,42 +77,51 @@ class AuthController {
     }
   }
 
-  /**
-   * User Login (Stage 1 of 2FA: Credentials verification)
-   */
   static async login(req, res, next) {
     try {
       const { identifier, password } = req.body;
 
-      // Look up user by email or mobile
-      const userWithHash = UserModel.findByEmailOrMobile(identifier);
+      const userWithHash =
+        await UserModel.findByEmailOrMobile(identifier);
 
-      // Return generic error if user not found (security practice: prevent enumeration)
       if (!userWithHash) {
-        logger.security(`Failed login attempt for non-existent identifier`);
+        logger.security(
+          'Failed login attempt for non-existent identifier'
+        );
+
         return res.status(401).json({
           success: false,
-          message: 'Invalid credentials. Please verify your email/mobile and password.',
+          message:
+            'Invalid credentials. Please verify your email/mobile and password.',
         });
       }
 
-      // Compare password against stored bcrypt hash
-      const isPasswordValid = await AuthService.comparePassword(password, userWithHash.password_hash);
-      if (!isPasswordValid) {
-        logger.security(`Failed login attempt for user: ${userWithHash.id}`);
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid credentials. Please verify your email/mobile and password.',
-        });
-      }
-
-      // Credentials valid! Generate & send 6-digit OTP for 2FA
-      const otpResult = await OtpService.generateAndSendOtp(userWithHash);
-      const challengeToken = AuthService.generateOtpChallengeToken(
-        userWithHash.id,
-        otpResult.otpId,
-        otpResult.expiresInSeconds
+      const isPasswordValid = await AuthService.comparePassword(
+        password,
+        userWithHash.password_hash
       );
+
+      if (!isPasswordValid) {
+        logger.security(
+          `Failed login attempt for user: ${userWithHash.id}`
+        );
+
+        return res.status(401).json({
+          success: false,
+          message:
+            'Invalid credentials. Please verify your email/mobile and password.',
+        });
+      }
+
+      const otpResult =
+        await OtpService.generateAndSendOtp(userWithHash);
+
+      const challengeToken =
+        AuthService.generateOtpChallengeToken(
+          userWithHash.id,
+          otpResult.otpId,
+          otpResult.expiresInSeconds
+        );
 
       return res.status(200).json({
         success: true,
@@ -119,16 +136,15 @@ class AuthController {
     }
   }
 
-  /**
-   * Verify OTP (Stage 2 of 2FA: Two-Factor Authentication completion)
-   */
   static async verifyOtp(req, res, next) {
     try {
       const { challengeToken, otp } = req.body;
-      const challenge = AuthService.verifyOtpChallengeToken(challengeToken);
 
-      // Check user exists
-      const user = UserModel.findById(challenge.userId);
+      const challenge =
+        AuthService.verifyOtpChallengeToken(challengeToken);
+
+      const user = await UserModel.findById(challenge.userId);
+
       if (!user) {
         return res.status(400).json({
           success: false,
@@ -136,10 +152,12 @@ class AuthController {
         });
       }
 
-      // Verify OTP
-      await OtpService.verifyOtp(challenge.userId, challenge.otpId, otp);
+      await OtpService.verifyOtp(
+        challenge.userId,
+        challenge.otpId,
+        otp
+      );
 
-      // Issue JWT access token
       const token = AuthService.generateToken({
         userId: user.id,
         email: user.email,
@@ -150,7 +168,8 @@ class AuthController {
 
       return res.status(200).json({
         success: true,
-        message: 'Authentication successful. Welcome to your Secure Banking Dashboard.',
+        message:
+          'Authentication successful. Welcome to your Secure Banking Dashboard.',
         token,
         user: {
           id: user.id,
@@ -164,31 +183,35 @@ class AuthController {
     }
   }
 
-  /**
-   * Resend OTP
-   */
   static async resendOtp(req, res, next) {
     try {
       const { challengeToken } = req.body;
-      const challenge = AuthService.verifyOtpChallengeToken(challengeToken);
 
-      const user = UserModel.findById(challenge.userId);
+      const challenge =
+        AuthService.verifyOtpChallengeToken(challengeToken);
+
+      const user = await UserModel.findById(challenge.userId);
+
       if (!user) {
         return res.status(400).json({
           success: false,
-          message: 'User session expired or not found. Please log in again.',
+          message:
+            'User session expired or not found. Please log in again.',
         });
       }
 
-      const otpResult = await OtpService.generateAndSendOtp(user, {
-        isResend: true,
-        otpId: challenge.otpId,
-      });
-      const nextChallengeToken = AuthService.generateOtpChallengeToken(
-        user.id,
-        otpResult.otpId,
-        otpResult.expiresInSeconds
-      );
+      const otpResult =
+        await OtpService.generateAndSendOtp(user, {
+          isResend: true,
+          otpId: challenge.otpId,
+        });
+
+      const nextChallengeToken =
+        AuthService.generateOtpChallengeToken(
+          user.id,
+          otpResult.otpId,
+          otpResult.expiresInSeconds
+        );
 
       return res.status(200).json({
         success: true,
@@ -202,14 +225,12 @@ class AuthController {
     }
   }
 
-  /**
-   * Logout
-   */
   static async logout(req, res, next) {
     try {
       if (req.token) {
-        AuthService.invalidateToken(req.token);
+        await AuthService.invalidateToken(req.token);
       }
+
       return res.status(200).json({
         success: true,
         message: 'Logged out successfully.',

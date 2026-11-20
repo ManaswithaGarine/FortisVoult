@@ -1,69 +1,92 @@
-const nodemailer = require('nodemailer');
+
 const config = require('../config/env');
 
-/**
- * Delivers login codes by email. The test provider captures messages in memory
- * so automated tests never send real email or write codes to logs.
- */
 class NotificationService {
   constructor() {
     this.lastDispatchedOtp = null;
-    this.transporter = null;
   }
 
   async sendOtp({ recipient, otp, name }) {
+    // Preserve the existing test-mode behavior.
     if (config.nodeEnv === 'test') {
-      this.lastDispatchedOtp = { recipient, otp, dispatchedAt: new Date() };
+      this.lastDispatchedOtp = {
+        recipient,
+        otp,
+        dispatchedAt: new Date(),
+      };
+
       return {
         success: true,
-        messageId: `TEST_MSG_${Date.now()}`,
-        provider: 'TestProvider',
+        message: 'Test OTP generated successfully.',
         recipient,
       };
     }
 
-    if (!config.smtpUser || !config.smtpAppPassword) {
-      const error = new Error('Email delivery is not configured. Set SMTP_USER and SMTP_APP_PASSWORD in backend/.env.');
-      error.statusCode = 503;
-      throw error;
+    if (!config.resendApiKey) {
+      throw new Error('RESEND_API_KEY is not configured.');
     }
 
-    if (!this.transporter) {
-      this.transporter = nodemailer.createTransport({
-        host: config.smtpHost,
-        port: config.smtpPort,
-        secure: config.smtpPort === 465,
-        auth: {
-          user: config.smtpUser,
-          pass: config.smtpAppPassword,
-        },
-      });
+    if (!config.emailFrom) {
+      throw new Error('EMAIL_FROM is not configured.');
     }
 
-    let result;
+    const payload = {
+      from: `Fortis Vault <${config.emailFrom}>`,
+      to: [recipient],
+      subject: 'Your Fortis Vault login code',
+      text: [
+        `Hello ${name},`,
+        '',
+        `Your Fortis Vault verification code is: ${otp}`,
+        '',
+        `This code expires in ${config.otpExpiryMinutes} minutes.`,
+        '',
+        'If you did not request this code, please ignore this email.',
+        '',
+        'Fortis Vault Security Team',
+      ].join('\n'),
+    };
+
+    let response;
+
     try {
-      result = await this.transporter.sendMail({
-        from: { name: 'Fortis Vault', address: config.smtpUser },
-        to: recipient,
-        subject: 'Your Fortis Vault login code',
-        text: `Hello ${name},\n\nYour Fortis Vault verification code is ${otp}. It expires in ${config.otpExpiryMinutes} minutes. If you did not request this code, you can ignore this email.`,
+      response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
       });
-    } catch {
-      const error = new Error('Unable to send the verification email. Check the Gmail SMTP settings and App Password in backend/.env.');
-      error.statusCode = 502;
-      throw error;
+    } catch (error) {
+      console.error('Resend network error:', error.message);
+
+      throw new Error('Unable to connect to the email service.');
+    }
+
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      console.error('Resend API error:', {
+        status: response.status,
+        message: result.message || result.error || 'Email delivery failed',
+      });
+
+      throw new Error('Unable to send OTP email.');
     }
 
     return {
       success: true,
-      messageId: result.messageId,
-      provider: 'Gmail SMTP',
+      messageId: result.id,
+      provider: 'Resend',
       recipient,
     };
   }
 
   getLastDispatchedOtp() {
-    return config.nodeEnv === 'test' ? this.lastDispatchedOtp : null;
+    return config.nodeEnv === 'test'
+      ? this.lastDispatchedOtp
+      : null;
   }
 }
 

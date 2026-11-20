@@ -1,10 +1,14 @@
+
 const AccountModel = require('../models/accountModel');
-const { maskAccountNumber, formatCurrency } = require('../utils/helpers');
+const {
+  maskAccountNumber,
+  formatCurrency,
+} = require('../utils/helpers');
 
 class AccountController {
   static async getAccount(req, res, next) {
     try {
-      const account = AccountModel.findByUserId(req.user.id);
+      const account = await AccountModel.findByUserId(req.user.id);
 
       if (!account) {
         return res.status(404).json({
@@ -32,7 +36,7 @@ class AccountController {
 
   static async getBalance(req, res, next) {
     try {
-      const account = AccountModel.findByUserId(req.user.id);
+      const account = await AccountModel.findByUserId(req.user.id);
 
       if (!account) {
         return res.status(404).json({

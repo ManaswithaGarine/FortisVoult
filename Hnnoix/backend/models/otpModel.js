@@ -1,65 +1,108 @@
+
 const crypto = require('crypto');
-const { getDb } = require('../config/db');
+const { query } = require('../config/db');
 
 class OtpModel {
-  static create({ userId, otpHash, expiresAt }) {
-    const db = getDb();
+  static mapOtp(row) {
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      userId: row.user_id,
+      otpHash: row.otp_hash,
+      expiresAt: row.expires_at,
+      attempts: row.attempts,
+      verified: row.verified,
+      createdAt: row.created_at,
+    };
+  }
+
+  static async create({ userId, otpHash, expiresAt, client = null }) {
+    const executor = client || { query };
     const id = crypto.randomUUID();
-    const now = new Date().toISOString();
 
-    const stmt = db.prepare(`
-      INSERT INTO otps (id, user_id, otp_hash, expires_at, attempts, verified, created_at)
-      VALUES (?, ?, ?, ?, 0, 0, ?)
-    `);
+    const result = await executor.query(
+      `INSERT INTO otps (
+        id, user_id, otp_hash, expires_at,
+        attempts, verified, created_at
+      )
+      VALUES ($1, $2, $3, $4, 0, FALSE, NOW())
+      RETURNING *`,
+      [id, userId, otpHash, expiresAt]
+    );
 
-    stmt.run(id, userId, otpHash, expiresAt, now);
-
-    return this.findById(id);
+    return this.mapOtp(result.rows[0]);
   }
 
-  static findById(id) {
-    const db = getDb();
-    const stmt = db.prepare(`
-      SELECT id, user_id as userId, otp_hash as otpHash, expires_at as expiresAt,
-             attempts, verified, created_at as createdAt
-      FROM otps WHERE id = ?
-    `);
-    const otp = stmt.get(id);
-    return otp || null;
+  static async findById(id, client = null) {
+    const executor = client || { query };
+
+    const result = await executor.query(
+      `SELECT *
+       FROM otps
+       WHERE id = $1`,
+      [id]
+    );
+
+    return this.mapOtp(result.rows[0]);
   }
 
-  static getLatestOtpForUser(userId) {
-    const db = getDb();
-    const stmt = db.prepare(`
-      SELECT id, user_id as userId, otp_hash as otpHash, expires_at as expiresAt,
-             attempts, verified, created_at as createdAt
-      FROM otps 
-      WHERE user_id = ? 
-      ORDER BY created_at DESC 
-      LIMIT 1
-    `);
-    const otp = stmt.get(userId);
-    return otp || null;
+  static async getLatestOtpForUser(userId, client = null) {
+    const executor = client || { query };
+
+    const result = await executor.query(
+      `SELECT *
+       FROM otps
+       WHERE user_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [userId]
+    );
+
+    return this.mapOtp(result.rows[0]);
   }
 
-  static incrementAttempts(id) {
-    const db = getDb();
-    const stmt = db.prepare('UPDATE otps SET attempts = attempts + 1 WHERE id = ?');
-    stmt.run(id);
-    return this.findById(id);
+  static async incrementAttempts(id, client = null) {
+    const executor = client || { query };
+
+    const result = await executor.query(
+      `UPDATE otps
+       SET attempts = attempts + 1
+       WHERE id = $1
+         AND verified = FALSE
+         AND expires_at > NOW()
+       RETURNING *`,
+      [id]
+    );
+
+    return this.mapOtp(result.rows[0]);
   }
 
-  static markVerified(id) {
-    const db = getDb();
-    const stmt = db.prepare('UPDATE otps SET verified = 1 WHERE id = ?');
-    stmt.run(id);
-    return this.findById(id);
+  static async markVerified(id, client = null) {
+    const executor = client || { query };
+
+    const result = await executor.query(
+      `UPDATE otps
+       SET verified = TRUE
+       WHERE id = $1
+         AND verified = FALSE
+       RETURNING *`,
+      [id]
+    );
+
+    return this.mapOtp(result.rows[0]);
   }
 
-  static invalidateUserOtps(userId) {
-    const db = getDb();
-    const stmt = db.prepare('UPDATE otps SET verified = 1 WHERE user_id = ?');
-    stmt.run(userId);
+  static async invalidateUserOtps(userId, client = null) {
+    const executor = client || { query };
+
+    await executor.query(
+      `UPDATE otps
+       SET verified = TRUE
+       WHERE user_id = $1
+         AND verified = FALSE`,
+      [userId]
+    );
   }
 }
 

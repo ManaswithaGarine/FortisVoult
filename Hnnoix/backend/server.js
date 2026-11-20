@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -5,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 
 const config = require('./config/env');
-const { getDb, closeDb } = require('./config/db');
+const { initDb, closeDb } = require('./config/db');
 const logger = require('./utils/logger');
 const errorHandler = require('./middleware/errorHandler');
 const { apiLimiter } = require('./middleware/rateLimiter');
@@ -18,25 +19,47 @@ const transactionRoutes = require('./routes/transactionRoutes');
 
 const app = express();
 
-// Initialize Database
-getDb();
+// Server port
+const PORT = config.port;
 
-// Security Middlewares
+// Allowed frontend origins
+const allowedOrigins = [
+  config.corsOrigin,
+];
+
+// Allow localhost only during development
+if (config.nodeEnv !== 'production') {
+  allowedOrigins.push(
+    'http://localhost:5173',
+    'http://127.0.0.1:5173'
+  );
+}
+
+// Security middleware
 app.use(
   helmet({
-    contentSecurityPolicy: false, // Permissive for local demo assets and Google Fonts
+    contentSecurityPolicy: false,
     crossOriginEmbedderPolicy: false,
   })
 );
+
+// CORS configuration
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, curl, postman) or matching origin
-      if (!origin || origin === config.corsOrigin || origin === 'http://localhost:5173' || origin === 'http://127.0.0.1:5173') {
-        callback(null, true);
-      } else {
-        callback(null, true); // For development flexibility
+      // Allow requests without an Origin header.
+      if (!origin) {
+        return callback(null, true);
       }
+
+      if (
+        allowedOrigins.includes(origin) ||
+        origin === app.locals.desktopOrigin
+      ) {
+        return callback(null, true);
+      }
+
+      return callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -44,14 +67,14 @@ app.use(
   })
 );
 
-// Body parser with payload limit to prevent DoS attacks
+// Request body limits
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
-// Apply rate limiter to API routes
+// API rate limiting
 app.use('/api', apiLimiter);
 
-// Health check endpoint
+// Health check
 app.get('/api/health', (req, res) => {
   res.status(200).json({
     status: 'healthy',
@@ -61,63 +84,115 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Mount API Routes
+// API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/transactions', transactionRoutes);
 
-// Optional: Serve frontend build in production if dist exists
+// Frontend static files (if available)
 const frontendDist = path.join(__dirname, '../frontend/dist');
+
 if (fs.existsSync(frontendDist)) {
   app.use(express.static(frontendDist));
-  app.get('*', (req, res) => {
-    if (!req.path.startsWith('/api')) {
-      res.sendFile(path.join(frontendDist, 'index.html'));
+
+  // Serve React application for non-API routes.
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && !req.path.startsWith('/api')) {
+      return res.sendFile(
+        path.join(frontendDist, 'index.html')
+      );
     }
+
+    next();
   });
 }
 
-// 404 handler for unmapped routes
-app.use('/api/*', (req, res) => {
+// API 404 handler
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({
+      success: false,
+      message: `API endpoint '${req.originalUrl}' not found.`,
+    });
+  }
+
+  next();
+});
+
+// General 404 handler
+app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: `API endpoint '${req.originalUrl}' not found.`,
+    message: 'Resource not found.',
   });
 });
 
 // Centralized error handler
 app.use(errorHandler);
 
-// Start server if executed directly
+// Start server only after PostgreSQL initialization succeeds.
 if (require.main === module) {
-  const server = app.listen(config.port, () => {
-    const url = `http://localhost:${config.port}`;
-    console.log(`
-\x1b[36m======================================================================\x1b[0m
-\x1b[1m\x1b[32m  FORTIS VAULT - SECURE BANKING APPLICATION IS READY\x1b[0m
-\x1b[36m======================================================================\x1b[0m
+  let server;
+  let isShuttingDown = false;
 
-  \x1b[1m➜  Localhost App:\x1b[0m   \x1b[1m\x1b[36m${url}\x1b[0m  \x1b[90m(Ctrl + Click to open in browser)\x1b[0m
-  \x1b[1m➜  API Endpoint:\x1b[0m    \x1b[36m${url}/api/health\x1b[0m
-  \x1b[1m➜  Environment:\x1b[0m     \x1b[33m${config.nodeEnv}\x1b[0m
-  \x1b[1m➜  Two-Factor 2FA:\x1b[0m  \x1b[32mActive (Cryptographic 6-digit OTP)\x1b[0m
+  const shutdown = async (signal) => {
+    if (isShuttingDown) return;
 
-\x1b[36m======================================================================\x1b[0m
-    `);
-  });
+    isShuttingDown = true;
+    logger.info(`${signal} received. Shutting down server...`);
 
-  const shutdown = () => {
-    logger.info('Shutting down server gracefully...');
-    server.close(() => {
-      closeDb();
-      logger.info('Server and Database connections closed.');
+    try {
+      if (server) {
+        await new Promise((resolve, reject) => {
+          server.close((error) => {
+            if (error) {
+              return reject(error);
+            }
+
+            resolve();
+          });
+        });
+      }
+
+      await closeDb();
+
+      logger.info('Server and database connections closed.');
       process.exit(0);
-    });
+    } catch (error) {
+      logger.error('Error during graceful shutdown:', error);
+      process.exit(1);
+    }
   };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  const startServer = async () => {
+    try {
+      await initDb();
+
+      logger.info('PostgreSQL database initialized successfully.');
+
+      server = app.listen(PORT, '0.0.0.0', () => {
+        logger.info(`Fortis Vault server running on port ${PORT}`);
+        logger.info(`Environment: ${config.nodeEnv}`);
+        logger.info('Health endpoint: /api/health');
+      });
+    } catch (error) {
+      logger.error('Failed to initialize application:', error);
+
+      try {
+        await closeDb();
+      } catch (closeError) {
+        logger.error('Failed to close database:', closeError);
+      }
+
+      process.exit(1);
+    }
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  startServer();
 }
 
 module.exports = app;
